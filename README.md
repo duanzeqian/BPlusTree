@@ -1,10 +1,13 @@
 # Project5 : B+ tree in Database
+> 
+>
+> 本次的Readme数据库相关知识点的内容来自由TWL学长，并改编自其版本。
 
-这是 "CS1959 (2023 - 2024 - 2) —— 程序设计与数据结构 II" 课程的第 5 个 project: 实现数据库中的 B+ 树。
+这是 "CS1966 (2025 - 2026 - 2) —— 程序设计与数据结构 II" 课程的第 4 个 project: 实现数据库中的 B+ 树。
 
 在这次 project 中， 我们会为 bustub 关系型数据库编写 B+ 树索引。完成本次 project 不需要具备额外的数据库相关知识。
 
-DDL : 第 18 周周六晚，`2024 年 6 月 22 日 23:59` 
+DDL : 第 16 周周日晚，`2026 年 6 月 21 日 23:59` 
 
 # 基础知识
 
@@ -702,27 +705,20 @@ class Context {
 
 ## 本地测试
 
-请到该项目的根目录执行
+请到该项目的根目录执行以下命令（按需选择）。
 
 ```shell
-sudo build_support/packages.sh # Linux 环境请执行这个
-build_support/packages.sh # macOS 可以直接这样执行
-# Windows 环境请使用 wsl 或者虚拟机
+# 完成 CMake 配置、编译 4 个测试，并运行 4 个测试
+build_support/run-bpt-tests.sh
 
-mkdir build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Debug ..
+# 从干净的 `build` 目录重新构建
+build_support/run-bpt-tests.sh --clean
+
+# 编译 4 个测试
+build_support/run-bpt-tests.sh --no-run
 ```
 
-之后， 每次测试需要重新 `make`, 命令如下:
-
-```shell
-cd build #进入 build 目录， 如果已经在 build 目录请忽略
-make b_plus_tree_insert_test b_plus_tree_delete_test b_plus_tree_contention_test b_plus_tree_concurrent_test -j$(nproc)
- #并行编译所有测试单元。 如果你暂时只想执行一部分测试程序， 请只 make 对应的 b_plus_tree_*_test。 
-```
-
-待编译好之后， 可以这样测试:
+构建好之后单独运行测试的命令如下（每次修改后的测试之前都要重新编译）：
 
 ```shell
 cd build #进入 build 目录， 如果已经在 build 目录请忽略
@@ -730,6 +726,13 @@ cd build #进入 build 目录， 如果已经在 build 目录请忽略
 ./test/b_plus_tree_delete_test
 ./test/b_plus_tree_contention_test
 ./test/b_plus_tree_concurrent_test
+```
+
+如果提示缺少 `cmake`、编译器或其他依赖，请先安装依赖：
+
+```shell
+sudo bash build_support/packages.sh -y # WSL / Ubuntu
+bash build_support/packages.sh -y      # macOS
 ```
 
 ## 提交测试
