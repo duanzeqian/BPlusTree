@@ -155,6 +155,16 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
     cur_id = internal->ValueAt(slot);
     cur_guard = bpm_->FetchPageWrite(cur_id);
     cur_page = cur_guard.template AsMut<BPlusTreePage>();
+
+    // concurrency: safe
+    bool safe = (cur_page->GetSize() + 1 < cur_page->GetMaxSize());
+    if (safe)
+    {
+      while (!path.empty())
+      {
+        path.pop_front();
+      }
+    }
   }
   path.push_back(std::move(cur_guard));
   page_id_t leaf_id = path.back().PageId();
@@ -257,6 +267,11 @@ auto BPLUSTREE_TYPE::Insert(const KeyType& key, const ValueType& value,
       parent->SetKeyAt(ins, up_key);
       parent->SetValueAt(ins, up_child);
       parent->SetSize(parent_sz + 1);
+      // concurrency: safe
+      while (!path.empty())
+      {
+        path.pop_front();
+      }
       return true;
     }
 
@@ -340,6 +355,16 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
     cur_id = internal->ValueAt(slot);
     cur_guard = bpm_->FetchPageWrite(cur_id);
     cur_page = cur_guard.template AsMut<BPlusTreePage>();
+
+    // concurrency: safe
+    bool safe = (cur_page->GetSize() - 1 >= cur_page->GetMinSize());
+    if (safe)
+    {
+      while (!path.empty())
+      {
+        path.pop_front();
+      }
+    }
   }
   path.push_back(std::move(cur_guard));
   page_id_t leaf_id = path.back().PageId();
@@ -435,6 +460,11 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
           leaf_page->SetValueAt(0, borrow_val);
           leaf_page->SetSize(leaf_sz + 1);
           parent->SetKeyAt(idx, leaf_page->KeyAt(0)); // change the represent key in parent
+          // concurrency: safe
+          while (!path.empty())
+          {
+            path.pop_front();
+          }
           return;
         }
       }
@@ -459,6 +489,11 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
           leaf_page->SetValueAt(leaf_sz, borrow_val);
           leaf_page->SetSize(leaf_sz + 1);
           parent->SetKeyAt(idx + 1, right_page->KeyAt(0));
+          // concurrency: safe
+          while (!path.empty())
+          {
+            path.pop_front();
+          }
           return;
         }
       }
@@ -519,7 +554,15 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
     }
     else // internal page, not root
     {
-      if (cur_page->GetSize() >= cur_page->GetMinSize()) return; // no need to redistribute
+      if (cur_page->GetSize() >= cur_page->GetMinSize()) // no need to redistribute
+      {
+        // concurrency: safe
+        while (!path.empty())
+        {
+          path.pop_front();
+        }
+        return;
+      }
 
       auto internal_page = reinterpret_cast<InternalPage*>(cur_page);
       if (idx > 0) // have left brother to borrow (the same as leaf_page)
@@ -543,6 +586,11 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
           internal_page->SetValueAt(0, borrow_val);
           internal_page->SetSize(internal_sz + 1);
           parent->SetKeyAt(idx, internal_page->KeyAt(0)); // change the represent key in parent
+          // concurrency: safe
+          while (!path.empty())
+          {
+            path.pop_front();
+          }
           return;
         }
       }
@@ -567,6 +615,11 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
           internal_page->SetValueAt(internal_sz, borrow_val);
           internal_page->SetSize(internal_sz + 1);
           parent->SetKeyAt(idx + 1, right_page->KeyAt(0));
+          // concurrency: safe
+          while (!path.empty())
+          {
+            path.pop_front();
+          }
           return;
         }
       }
