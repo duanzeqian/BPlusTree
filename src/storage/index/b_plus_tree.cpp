@@ -331,7 +331,12 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
   {
     path.push_back(std::move(cur_guard));
     auto internal = reinterpret_cast<InternalPage*>(cur_page);
-    int slot = BinaryFind(internal, key);
+    int slot = 0;
+    for (int i = 1; i < internal->GetSize(); ++i)
+    {
+      if (comparator_(key, internal->KeyAt(i)) < 0) break;
+      slot = i;
+    }
     cur_id = internal->ValueAt(slot);
     cur_guard = bpm_->FetchPageWrite(cur_id);
     cur_page = cur_guard.template AsMut<BPlusTreePage>();
@@ -340,7 +345,6 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
   page_id_t leaf_id = path.back().PageId();
   auto leaf = reinterpret_cast<LeafPage*>(path.back().template AsMut<BPlusTreePage>());
 
-  // int pos = BinaryFind(leaf, key);
   int pos = -1, leaf_sz = leaf->GetSize();
   for (int i = 0; i < leaf_sz; ++i)
   {
@@ -373,13 +377,260 @@ void BPLUSTREE_TYPE::Remove(const KeyType& key, Transaction* txn) {
 
   if (leaf->GetSize() >= leaf->GetMinSize()) return; // no need to redistribute
 
-  
+  while (true) // filter towards the root
+  {
+    WritePageGuard cur_guard = std::move(path.back());
+    page_id_t cur_page_id = cur_guard.PageId();
+    auto cur_page = cur_guard.template AsMut<BPlusTreePage>();
+    path.pop_back();
+
+    if (path.empty()) // current is not-leaf root
+    {
+      if (cur_page->GetSize() == 1) // root has only one child, then make it the new root
+      {
+        auto internal = reinterpret_cast<InternalPage*>(cur_page);
+        page_id_t new_root_id = internal->ValueAt(0);
+        WritePageGuard header_guard = bpm_->FetchPageWrite(header_page_id_);
+        auto header = header_guard.template AsMut<BPlusTreeHeaderPage>();
+        header->root_page_id_ = new_root_id;
+        bpm_->DeletePage(cur_page_id);
+      }
+      // else, there are no need to modify
+      return; 
+    }
+
+    WritePageGuard parent_guard = std::move(path.back());
+    auto parent = parent_guard.template AsMut<InternalPage>();
+    int idx = -1;
+    for (int i = 0; i < parent->GetSize(); ++i)
+    {
+      if (parent->ValueAt(i) == cur_page_id)
+      {
+        idx = i;
+        break;
+      }
+    }
+
+    if (cur_page->IsLeafPage()) // leaf page
+    {
+      auto leaf_page = reinterpret_cast<LeafPage*>(cur_page);
+      if (idx > 0) // have left brother to borrow
+      {
+        page_id_t left_id = parent->ValueAt(idx - 1);
+        WritePageGuard left_guard = bpm_->FetchPageWrite(left_id);
+        auto left_page = left_guard.template AsMut<LeafPage>();
+        if (left_page->GetSize() > left_page->GetMinSize()) // can borrow
+        {
+          int left_sz = left_page->GetSize();
+          KeyType borrow_key = left_page->KeyAt(left_sz - 1);
+          ValueType borrow_val = left_page->ValueAt(left_sz - 1); // get the last (key, value) in left_page
+          left_page->SetSize(left_sz - 1);
+          int leaf_sz = leaf_page->GetSize();
+          for (int i = leaf_sz; i > 0; --i)
+          {
+            leaf_page->SetKeyAt(i, leaf_page->KeyAt(i - 1));
+            leaf_page->SetValueAt(i, leaf_page->ValueAt(i - 1));
+          }
+          leaf_page->SetKeyAt(0, borrow_key);
+          leaf_page->SetValueAt(0, borrow_val);
+          leaf_page->SetSize(leaf_sz + 1);
+          parent->SetKeyAt(idx, leaf_page->KeyAt(0)); // change the represent key in parent
+          return;
+        }
+      }
+      else if (idx + 1 < parent->GetSize()) // have right brother to borrow
+      {
+        page_id_t right_id = parent->ValueAt(idx + 1);
+        WritePageGuard right_guard = bpm_->FetchPageWrite(right_id);
+        auto right_page = right_guard.template AsMut<LeafPage>();
+        if (right_page->GetSize() > right_page->GetMinSize()) // can borrow
+        {
+          KeyType borrow_key = right_page->KeyAt(0);
+          ValueType borrow_val = right_page->ValueAt(0);
+          int right_sz = right_page->GetSize();
+          for (int i = 0; i < right_sz - 1; ++i)
+          {
+            right_page->SetKeyAt(i, right_page->KeyAt(i + 1));
+            right_page->SetValueAt(i, right_page->ValueAt(i + 1));
+          }
+          right_page->SetSize(right_sz - 1);
+          int leaf_sz = leaf_page->GetSize();
+          leaf_page->SetKeyAt(leaf_sz, borrow_key);
+          leaf_page->SetValueAt(leaf_sz, borrow_val);
+          leaf_page->SetSize(leaf_sz + 1);
+          parent->SetKeyAt(idx + 1, right_page->KeyAt(0));
+          return;
+        }
+      }
+      // can't borrow, try to merge
+      if (idx > 0) // merge with left brother
+      {
+        page_id_t left_id = parent->ValueAt(idx - 1);
+        WritePageGuard left_guard = bpm_->FetchPageWrite(left_id);
+        auto left_page = left_guard.template AsMut<LeafPage>();
+        int left_sz = left_page->GetSize(); // merge leaf into left
+        int leaf_sz = leaf_page->GetSize();
+        for (int i = 0; i < leaf_sz; ++i)
+        {
+          left_page->SetKeyAt(left_sz + i, leaf_page->KeyAt(i));
+          left_page->SetValueAt(left_sz + i, leaf_page->ValueAt(i));
+        }
+        left_page->SetSize(left_sz + leaf_sz);
+        left_page->SetNextPageId(leaf_page->GetNextPageId());
+
+        int parent_sz = parent->GetSize();
+        for (int i = idx; i < parent_sz - 1; ++i) // delete leaf in parent
+        {
+          parent->SetKeyAt(i, parent->KeyAt(i + 1));
+          parent->SetValueAt(i, parent->ValueAt(i + 1));
+        }
+        parent->SetSize(parent_sz - 1);
+        bpm_->DeletePage(cur_page_id);
+        path.pop_back();
+        path.push_back(std::move(parent_guard)); // update the parent_guard
+        continue;
+      }
+      else // have to merge with right brother
+      {
+        page_id_t right_id = parent->ValueAt(idx + 1);
+        WritePageGuard right_guard = bpm_->FetchPageWrite(right_id);
+        auto right_page = right_guard.template AsMut<LeafPage>();
+        int leaf_sz = leaf_page->GetSize(); // merge right into leaf
+        int right_sz = right_page->GetSize();
+        for (int i = 0; i < right_sz; ++i)
+        {
+          leaf_page->SetKeyAt(leaf_sz + i, right_page->KeyAt(i));
+          leaf_page->SetValueAt(leaf_sz + i, right_page->ValueAt(i));
+        }
+        leaf_page->SetSize(leaf_sz + right_sz);
+        leaf_page->SetNextPageId(right_page->GetNextPageId());
+        int parent_sz = parent->GetSize();
+        for (int i = idx + 1; i < parent_sz - 1; ++i) // delete right in parent
+        {
+          parent->SetKeyAt(i, parent->KeyAt(i + 1));
+          parent->SetValueAt(i, parent->ValueAt(i + 1));
+        }
+        parent->SetSize(parent_sz - 1);
+        bpm_->DeletePage(right_id);
+        path.pop_back();
+        path.push_back(std::move(parent_guard)); // update the parent_guard
+        continue;
+      }
+    }
+    else // internal page, not root
+    {
+      if (cur_page->GetSize() >= cur_page->GetMinSize()) return; // no need to redistribute
+
+      auto internal_page = reinterpret_cast<InternalPage*>(cur_page);
+      if (idx > 0) // have left brother to borrow (the same as leaf_page)
+      {
+        page_id_t left_id = parent->ValueAt(idx - 1);
+        WritePageGuard left_guard = bpm_->FetchPageWrite(left_id);
+        auto left_page = left_guard.template AsMut<InternalPage>();
+        if (left_page->GetSize() > left_page->GetMinSize()) // can borrow
+        {
+          int left_sz = left_page->GetSize();
+          KeyType borrow_key = left_page->KeyAt(left_sz - 1);
+          auto borrow_val = left_page->ValueAt(left_sz - 1); // get the last (key, value) in left_page
+          left_page->SetSize(left_sz - 1);
+          int internal_sz = internal_page->GetSize();
+          for (int i = internal_sz; i > 0; --i)
+          {
+            internal_page->SetKeyAt(i, internal_page->KeyAt(i - 1));
+            internal_page->SetValueAt(i, internal_page->ValueAt(i - 1));
+          }
+          internal_page->SetKeyAt(0, borrow_key);
+          internal_page->SetValueAt(0, borrow_val);
+          internal_page->SetSize(internal_sz + 1);
+          parent->SetKeyAt(idx, internal_page->KeyAt(0)); // change the represent key in parent
+          return;
+        }
+      }
+      else if (idx + 1 < parent->GetSize()) // have right brother to borrow
+      {
+        page_id_t right_id = parent->ValueAt(idx + 1);
+        WritePageGuard right_guard = bpm_->FetchPageWrite(right_id);
+        auto right_page = right_guard.template AsMut<InternalPage>();
+        if (right_page->GetSize() > right_page->GetMinSize()) // can borrow
+        {
+          KeyType borrow_key = right_page->KeyAt(0);
+          auto borrow_val = right_page->ValueAt(0);
+          int right_sz = right_page->GetSize();
+          for (int i = 0; i < right_sz - 1; ++i)
+          {
+            right_page->SetKeyAt(i, right_page->KeyAt(i + 1));
+            right_page->SetValueAt(i, right_page->ValueAt(i + 1));
+          }
+          right_page->SetSize(right_sz - 1);
+          int internal_sz = internal_page->GetSize();
+          internal_page->SetKeyAt(internal_sz, borrow_key);
+          internal_page->SetValueAt(internal_sz, borrow_val);
+          internal_page->SetSize(internal_sz + 1);
+          parent->SetKeyAt(idx + 1, right_page->KeyAt(0));
+          return;
+        }
+      }
+      // can't borrow, try to merge (have a little difference)
+      if (idx > 0) // merge with left brother
+      {
+        page_id_t left_id = parent->ValueAt(idx - 1);
+        WritePageGuard left_guard = bpm_->FetchPageWrite(left_id);
+        auto left_page = left_guard.template AsMut<InternalPage>();
+        int left_sz = left_page->GetSize(); // merge leaf into left
+        int internal_sz = internal_page->GetSize();
+        left_page->SetKeyAt(left_sz, parent->KeyAt(idx));
+        for (int i = 0; i < internal_sz; ++i)
+        {
+          if (i > 0) left_page->SetKeyAt(left_sz + i, internal_page->KeyAt(i)); // don;t reserve the empty key
+          left_page->SetValueAt(left_sz + i, internal_page->ValueAt(i));
+        }
+        left_page->SetSize(left_sz + internal_sz);
+
+        int parent_sz = parent->GetSize();
+        for (int i = idx; i < parent_sz - 1; ++i) // delete leaf in parent
+        {
+          parent->SetKeyAt(i, parent->KeyAt(i + 1));
+          parent->SetValueAt(i, parent->ValueAt(i + 1));
+        }
+        parent->SetSize(parent_sz - 1);
+        bpm_->DeletePage(cur_page_id);
+        path.pop_back();
+        path.push_back(std::move(parent_guard)); // update the parent_guard
+        continue;
+      }
+      else // have to merge with right brother
+      {
+        page_id_t right_id = parent->ValueAt(idx + 1);
+        WritePageGuard right_guard = bpm_->FetchPageWrite(right_id);
+        auto right_page = right_guard.template AsMut<InternalPage>();
+        int internal_sz = internal_page->GetSize(); // merge right into leaf
+        int right_sz = right_page->GetSize();
+        internal_page->SetKeyAt(internal_sz, parent->KeyAt(idx + 1));
+        for (int i = 0; i < right_sz; ++i)
+        {
+          if (i > 0) internal_page->SetKeyAt(internal_sz + i, right_page->KeyAt(i));
+          internal_page->SetValueAt(internal_sz + i, right_page->ValueAt(i));
+        }
+        internal_page->SetSize(internal_sz + right_sz);
+        int parent_sz = parent->GetSize();
+        for (int i = idx + 1; i < parent_sz - 1; ++i) // delete right in parent
+        {
+          parent->SetKeyAt(i, parent->KeyAt(i + 1));
+          parent->SetValueAt(i, parent->ValueAt(i + 1));
+        }
+        parent->SetSize(parent_sz - 1);
+        bpm_->DeletePage(right_id);
+        path.pop_back();
+        path.push_back(std::move(parent_guard)); // update the parent_guard
+        continue;
+      }
+    }
+  }
 }
 
 /*****************************************************************************
  * INDEX ITERATOR
  *****************************************************************************/
-
 
 INDEX_TEMPLATE_ARGUMENTS
 auto BPLUSTREE_TYPE::BinaryFind(const LeafPage* leaf_page, const KeyType& key)
